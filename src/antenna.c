@@ -1,8 +1,5 @@
+#include <stdarg.h>
 #include <stdlib.h>
-/*
-#include <stdio.h>
-#include <string.h>
-*/
 
 #include "hdf5.h"
 #include "antenna.h"
@@ -31,38 +28,79 @@ struct tabulated_antenna
 };
 
 
-static double complex tabulated_antenna_impedance(
-    struct grand_antenna * antenna, enum grand_antenna_arm arm,
-    double frequency)
+#define ERROR_MSG_SIZE 1024
+static char last_error_msg[ERROR_MSG_SIZE] = {0x0};
+
+static int error(char * format, ...)
 {
-        if (antenna == NULL) return 0;
+        va_list args;
+        va_start(args, format);
+        vsnprintf(last_error_msg, ERROR_MSG_SIZE, format, args);
+        va_end(args);
+
+        return EXIT_FAILURE;
+}
+#undef ERROR_MSG_SIZE
+
+
+void grand_error_clear(void)
+{
+        last_error_msg[0] = 0x0;
+}
+
+
+const char * grand_error_get(void)
+{
+        return (last_error_msg[0] == 0x0) ? NULL : last_error_msg;
+}
+
+
+static int tabulated_antenna_impedance(
+    struct grand_antenna * antenna, enum grand_antenna_arm arm,
+    double frequency, double complex * result)
+{
+        if (antenna == NULL) {
+                return error("bad antenna (NULL)");
+        }
         struct tabulated_antenna * t = (void *)antenna;
-        if ((arm < 0) || (arm >= t->n_arm)) return 0;
+
+        if ((arm < 0) || (arm >= t->n_arm)) {
+                return error("bad arm (expected a number in [0, %d], got %d)",
+                             t->n_arm -1);
+        }
 
         const int n = t->n_freq;
         const float * const f = t->freq;
         const float * const r = t->resistance + n * arm;
         const float * const x = t->reactance + n * arm;
 
-        if ((frequency < f[0]) || (frequency > f[n - 1]))
-                return 0;
-        else if (frequency == f[n -1])
-                return r[n - 1] + I * x[n - 1];
+        if ((frequency < f[0]) || (frequency > f[n - 1])) {
+                return error("bad frequency (expected a value in [%g, %g], "
+                             "got %g)", f[0], f[n - 1], frequency);
+        }
+        else if (frequency == f[n -1]) {
+                *result = r[n - 1] + I * x[n - 1];
+        } else {
+                double h1 = (frequency - f[0]) / (f[n - 1] - f[0]) * (n - 1);
+                const int i0 = (int)h1;
+                h1 -= i0;
+                const double h0 = 1 - h1;
+                const int i1 = i0 + 1;
+                *result = r[i0] * h0 + r[i1] * h1 +
+                          I * (x[i0] * h0 + x[i1] * h1);
+        }
 
-        double h1 = (frequency - f[0]) / (f[n - 1] - f[0]) * (n - 1);
-        const int i0 = (int)h1;
-        h1 -= i0;
-        const double h0 = 1 - h1;
-        const int i1 = i0 + 1;
-        return r[i0] * h0 + r[i1] * h1 + I * (x[i0] * h0 + x[i1] * h1);
+        return EXIT_SUCCESS;
 }
 
 
-static double complex tabulated_antenna_effective_length(
+static int tabulated_antenna_effective_length(
     struct grand_antenna * antenna, enum grand_antenna_arm arm,
-    double frequency, double phi, double theta)
+    double frequency, double phi, double theta, double complex result[3])
 {
         /* XXX interpolate */
+
+        return EXIT_FAILURE;
 }
 
 
