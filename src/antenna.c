@@ -1,9 +1,10 @@
 #include <stdarg.h>
 #include <stdlib.h>
+#include<math.h>
 
 #include "hdf5.h"
 #include "antenna.h"
-
+#define RADDEG 57.295779513082321
 
 struct tabulated_antenna
 {
@@ -57,15 +58,15 @@ const char * grand_error_get(void)
 
 static int tabulated_antenna_impedance(
     struct grand_antenna * antenna, enum grand_antenna_arm arm,
-    double frequency, double complex * result)
+    double frequency, double * res_mag, double * res_phase)
 {
         if (antenna == NULL) {
                 return error("bad antenna (NULL)");
         }
-        struct tabulated_antenna * t = (void *)antenna;
+        struct tabulated_antenna * t = (struct tabulated_antenna *)antenna;
 
         if ((arm < 0) || (arm >= t->n_arm)) {
-                return error("bad arm (expected a number in [0, %d], got %d)",
+                return error("bad arm (expected a value in [0, %d], got %d)",
                              t->n_arm -1);
         }
 
@@ -74,20 +75,29 @@ static int tabulated_antenna_impedance(
         const float * const r = t->resistance + n * arm;
         const float * const x = t->reactance + n * arm;
 
+        double re, im;
         if ((frequency < f[0]) || (frequency > f[n - 1])) {
                 return error("bad frequency (expected a value in [%g, %g], "
                              "got %g)", f[0], f[n - 1], frequency);
-        }
-        else if (frequency == f[n -1]) {
-                *result = r[n - 1] + I * x[n - 1];
+        } else if (frequency == f[n -1]) {
+                re = r[n - 1];
+                im = x[n - 1];
         } else {
                 double h1 = (frequency - f[0]) / (f[n - 1] - f[0]) * (n - 1);
                 const int i0 = (int)h1;
                 h1 -= i0;
                 const double h0 = 1 - h1;
                 const int i1 = i0 + 1;
-                *result = r[i0] * h0 + r[i1] * h1 +
-                          I * (x[i0] * h0 + x[i1] * h1);
+                re = r[i0] * h0 + r[i1] * h1;
+                im = x[i0] * h0 + x[i1] * h1;
+        }
+
+        if (res_mag != NULL) *res_mag = sqrt(re * re + im * im);
+        if (res_phase != NULL) {
+                if ((re != 0) || (im != 0))
+                        *res_phase = atan2(im, re);
+                else
+                        *res_phase = 0;
         }
 
         return EXIT_SUCCESS;
@@ -96,11 +106,120 @@ static int tabulated_antenna_impedance(
 
 static int tabulated_antenna_effective_length(
     struct grand_antenna * antenna, enum grand_antenna_arm arm,
-    double frequency, double phi, double theta, double complex result[3])
+    double frequency, double phi, double theta,
+    double res_mag[3],double res_phase[3])
 {
-        /* XXX interpolate */
+        double weight[8]; // (0-3: low freq, even: low theta, 0,1,4,5: low phi)
+        int index[8]; // to make it easier...
+        double Lsph_real[3], Lsph_imag[3];
+        double Lcart_real[3], Lcart_imag[3];
+        // phi and theta are in degrees!
+        double phi_rad = phi/RADDEG;
+        double theta_rad = theta/RADDEG;
 
-        return EXIT_FAILURE;
+        if (antenna == NULL)
+                return error("bad antenna (NULL)");
+        struct tabulated_antenna * t = (struct tabulated_antenna *)antenna;
+
+        if ((arm < 0) || (arm >= t->n_arm)) {
+                return error("bad arm (expected a number in [0, %d], got %d)",
+                             t->n_arm -1);
+        }
+
+        // freq. dependent weights; easy interpolation
+        const int nf = t->n_freq;
+        const float * const f = t->freq;
+        if ((frequency < f[0]) || (frequency > f[nf - 1]))
+          return error("bad frequency (expected a value in [%g, %g], got %g)",
+                       f[0], f[nf - 1], frequency);
+        double h1f = (frequency - f[0]) / (f[nf - 1] - f[0]) * (nf - 1);
+        int i0f = (int)h1f;
+        int i1f = i0f+1;
+        if(i1f == nf) i1f = i0f;
+
+        // Theta dependent weights; easy interpolation
+        const int nt = t->n_theta;
+        const float * const th = t->theta;
+        if ((theta < th[0]) || (theta > th[nt - 1])) {
+                return error("bad theta (expected a value in [%g, %g], got %g)",
+                             th[0], th[nt - 1], theta);
+        }
+        double h1t = (theta- th[0]) / (th[nt - 1] - th[0]) * (nt - 1);
+        int i0t = (int)h1t;
+        int i1t = i0t+1;
+        if(i1t == nt) i1t=i0t;
+
+        // Phi dependent weights; easy interpolation Note that phi 0==360!
+        const int np = t->n_phi;
+        const float * const p = t->phi;
+        double h1p = (fmod(phi,360) - p[0]) / (p[np - 1] - p[0]) * (np - 1);
+        int i0p = (int)h1p;
+        int i1p = i0p+1;
+        if(i1p == np) i1p = i0p;
+
+        weight[0] = (i1f - h1f) * (i1t - h1t) * (i1p - h1p);
+        index[0] = (i0f * np + i0p) * nt + i0t;
+        weight[1] = (i1f - h1f) * (h1t - i0t) * (i1p - h1p);
+        index[1] = (i0f * np + i0p) * nt + i1t;
+        weight[2] = (i1f - h1f) * (i1t - h1t) * (h1p - i0p);
+        index[2] = (i0f * np + i1p) * nt + i0t;
+        weight[3] = (i1f - h1f) * (h1t - i0t) * (h1p - i0p);
+        index[3] = (i0f * np + i1p) * nt + i1t;
+        weight[4] = (h1f - i0f) * (i1t - h1t) * (i1p - h1p);
+        index[4] = (i1f * np + i0p) * nt + i0t;
+        weight[5] = (h1f - i0f) * (h1t - i0t) * (i1p - h1p);
+        index[5] = (i1f * np + i0p) * nt + i1t;
+        weight[6] = (h1f - i0f) * (i1t - h1t) * (h1p - i0p);
+        index[6] = (i1f * np + i1p) * nt + i0t;
+        weight[7] = (h1f - i0f) * (h1t - i0t) * (h1p - i0p);
+        index[7] = (i1f * np + i1p) * nt + i1t;
+        Lsph_real[0] = 0; //not used anyway (L_R)
+        Lsph_imag[0] = 0; //not used anyway (L_R)
+        const float * const lefp = t->leff_phi + nf * nt * np * arm;
+        const float * const lpp = t->phase_phi + nf * nt * np * arm;
+        Lsph_real[1] = 0;
+        Lsph_imag[1] = 0;
+        for(int i = 0; i < 8; i++) {
+                Lsph_real[1] += weight[i] * lefp[index[i]] * cos(lpp[index[i]]);
+                Lsph_imag[1] += weight[i] * lefp[index[i]] * sin(lpp[index[i]]);
+        }
+        Lsph_real[2] = 0;
+        Lsph_imag[2] = 0;
+        const float * const left = t->leff_theta + nf * nt * np * arm;
+        const float * const lpt = t->phase_theta + nf * nt * np * arm;
+        for(int i = 0; i < 8; i++) {
+                Lsph_real[2] += weight[i] * left[index[i]] * cos(lpt[index[i]]);
+                Lsph_imag[2] += weight[i] * left[index[i]] * sin(lpt[index[i]]);
+        }
+        Lcart_real[0] = -Lsph_real[1] * sin(phi_rad) +
+                         Lsph_real[2] * cos(phi_rad) * cos(theta_rad);
+        Lcart_real[1] = Lsph_real[1] * cos(phi_rad) +
+                        Lsph_real[2] * sin(phi_rad) * cos(theta_rad);
+        Lcart_real[2] = -Lsph_real[2] * sin(theta_rad);
+        Lcart_imag[0] = -Lsph_imag[1] * sin(phi_rad) +
+                         Lsph_imag[2] * cos(phi_rad) * cos(theta_rad);
+        Lcart_imag[1] = Lsph_imag[1] * cos(phi_rad) +
+                        Lsph_imag[2] * sin(phi_rad) * cos(theta_rad);
+        Lcart_imag[2] = -Lsph_imag[2] * sin(theta_rad);
+
+        if (res_mag != NULL) {
+                for(int i = 0; i < 3; i++)
+                        res_mag[i] = sqrt(Lcart_real[i] * Lcart_real[i] +
+                                          Lcart_imag[i] * Lcart_imag[i]);
+        }
+
+        if (res_phase != NULL) {
+                for(int i = 0; i < 3; i++) {
+                        if ((Lcart_real[i] != 0) || (Lcart_imag[i] != 0)) {
+                                res_phase[i] = atan2(Lcart_imag[i],
+                                                     Lcart_real[i]);
+                        } else {
+                                res_phase[i] = 0;
+                        }
+                }
+        }
+
+        return EXIT_SUCCESS;
 }
 
 
@@ -123,6 +242,7 @@ static int tabulated_antenna_load(struct tabulated_antenna ** antenna,
         hsize_t dims[3], max_dims;
         const int n_arm = 3;
         struct tabulated_antenna * ant;
+        size_t size;
 
         int rc = EXIT_FAILURE;
         if (antenna == NULL) return rc;
@@ -160,7 +280,7 @@ static int tabulated_antenna_load(struct tabulated_antenna ** antenna,
                 if (rank != 1) goto clean_and_exit;
         }
 
-        size_t size = sizeof(*ant) + sizeof(float) * (
+        size = sizeof(*ant) + sizeof(float) * (
             dims[0] + //list frequencies
             dims[1] + //list phi
             dims[2] + //list theta
@@ -171,7 +291,7 @@ static int tabulated_antenna_load(struct tabulated_antenna ** antenna,
                 )
             )
         );
-        if ((ant = malloc(size)) == NULL)
+        if ((ant = (struct tabulated_antenna *)malloc(size)) == NULL)
                 goto clean_and_exit; //cannot allocate free memory
 
         //set pointers to all starting points of the data

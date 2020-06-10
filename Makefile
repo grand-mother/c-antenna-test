@@ -1,5 +1,5 @@
 CFLAGS += $(shell pkg-config --cflags hdf5) -O3
-LIBS= $(shell pkg-config --libs hdf5)
+LIBS= $(shell pkg-config --libs hdf5) -lm
 
 # H5PY_LIBS= ../grand/bin/python3-x86_64.AppDir/opt/python3.8/lib/python3.8/site-packages/h5py/.libs/
 # LIBS= $(H5PY_LIBS)/libhdf5-2d27eb21.so.103.0.0 -Wl,-rpath,$(H5PY_LIBS)
